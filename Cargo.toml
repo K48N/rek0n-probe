@@ -1,0 +1,32 @@
+[package]
+name = "rek0n-probe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+authors = ["kon"]
+description = "Cross-platform GPU memory probe for rek0n backend selection"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/K48N/rek0n-probe"
+homepage = "https://github.com/K48N/rek0n-probe"
+keywords = ["gpu", "vram", "wgpu", "hardware", "memory"]
+categories = ["hardware-support", "os"]
+exclude = ["/target"]
+
+[lib]
+name = "rek0n_probe"
+path = "src/lib.rs"
+
+[dependencies]
+wgpu = "24"
+pollster = "0.4"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.52", features = ["Win32_Graphics_Dxgi", "Win32_Foundation"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"
+libc = "0.2"
+
+[package.metadata.docs.rs]
+all-features = true
