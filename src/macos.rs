@@ -91,7 +91,11 @@ fn c_string_from_nsstring(nsstring: *mut c_void) -> Option<String> {
     if utf8.is_null() {
         return None;
     }
-    Some(unsafe { std::ffi::CStr::from_ptr(utf8) }.to_string_lossy().into_owned())
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(utf8) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 unsafe fn msg_send_id0(receiver: *mut c_void, selector: &str) -> *mut c_void {
