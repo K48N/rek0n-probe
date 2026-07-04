@@ -2,7 +2,7 @@
 name = "rek0n-probe"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.86"
 authors = ["kon"]
 description = "Cross-platform GPU memory probe for rek0n backend selection"
 readme = "README.md"
