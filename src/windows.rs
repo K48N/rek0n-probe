@@ -12,6 +12,7 @@ pub fn get_platform_vram(identity: Option<&GpuAdapterIdentity>) -> u64 {
             "rek0n-probe: no DXGI adapter matched wgpu selection ({})",
             identity.name
         );
+        return 0;
     }
 
     dxgi_budget_high_performance(None)
@@ -103,7 +104,7 @@ fn adapter_local_budget(adapter: &IDXGIAdapter1) -> u64 {
 
     let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
     match unsafe { adapter3.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) } {
-        Ok(()) => info.Budget,
+        Ok(()) => info.Budget.saturating_sub(info.CurrentUsage),
         Err(err) => {
             eprintln!("rek0n-probe: QueryVideoMemoryInfo failed: {err:?}");
             0

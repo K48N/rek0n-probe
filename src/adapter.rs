@@ -1,4 +1,8 @@
+use std::time::Duration;
+
 use wgpu::{DeviceType, PowerPreference};
+
+const ADAPTER_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuAdapterIdentity {
@@ -16,6 +20,15 @@ pub enum GpuDeviceType {
 }
 
 pub fn preferred_wgpu_adapter() -> Option<GpuAdapterIdentity> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(request_adapter_sync());
+    });
+
+    rx.recv_timeout(ADAPTER_PROBE_TIMEOUT).ok().flatten()
+}
+
+fn request_adapter_sync() -> Option<GpuAdapterIdentity> {
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: PowerPreference::HighPerformance,

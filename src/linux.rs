@@ -429,9 +429,10 @@ pub fn get_platform_vram(identity: Option<&GpuAdapterIdentity>) -> u64 {
             return available;
         }
         eprintln!(
-            "rek0n-probe: adapter-specific probe failed for {}, falling back",
+            "rek0n-probe: adapter-specific probe failed for {}, assuming 0 bytes VRAM",
             identity.name
         );
+        return 0;
     }
 
     let available = fallback_probe();

@@ -11,7 +11,7 @@ mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 pub use adapter::{preferred_wgpu_adapter, GpuAdapterIdentity, GpuDeviceType};
@@ -29,6 +29,25 @@ mod sys_probe {
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     pub(crate) fn get_platform_vram(_identity: Option<&crate::GpuAdapterIdentity>) -> u64 {
         0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VramAvailability {
+    Unknown,
+    Bytes(u64),
+}
+
+impl VramAvailability {
+    pub fn as_bytes(self) -> u64 {
+        match self {
+            Self::Unknown => 0,
+            Self::Bytes(bytes) => bytes,
+        }
+    }
+
+    pub fn is_unknown(self) -> bool {
+        matches!(self, Self::Unknown)
     }
 }
 
@@ -63,6 +82,7 @@ impl Default for VramMonitor {
 
 impl VramMonitor {
     pub fn new(interval: Duration) -> Self {
+        let interval = interval.max(Duration::from_secs(1));
         Self {
             interval,
             state: Mutex::new(MonitorState {
@@ -90,10 +110,18 @@ impl VramMonitor {
             }),
         }
     }
+}
 
+fn lock_state(state: &Mutex<MonitorState>) -> MutexGuard<'_, MonitorState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl VramMonitor {
     #[doc(hidden)]
     pub fn set_available_bytes(&self, available_bytes: u64) {
-        let mut state = self.state.lock().expect("vram monitor lock poisoned");
+        let mut state = lock_state(&self.state);
         state.fixed_available = Some(available_bytes);
     }
 
@@ -102,15 +130,18 @@ impl VramMonitor {
     }
 
     pub fn adapter(&self) -> Option<GpuAdapterIdentity> {
-        self.state
-            .lock()
-            .expect("vram monitor lock poisoned")
-            .adapter
-            .clone()
+        let mut state = lock_state(&self.state);
+        if state
+            .cached_at
+            .is_none_or(|cached_at| cached_at.elapsed() >= self.interval)
+        {
+            refresh_state(&mut state);
+        }
+        state.adapter.clone()
     }
 
     pub fn available_bytes(&self) -> u64 {
-        let mut state = self.state.lock().expect("vram monitor lock poisoned");
+        let mut state = lock_state(&self.state);
         if state
             .cached_at
             .is_none_or(|cached_at| cached_at.elapsed() >= self.interval)
@@ -121,40 +152,77 @@ impl VramMonitor {
     }
 
     pub fn refresh(&self) -> u64 {
-        let mut state = self.state.lock().expect("vram monitor lock poisoned");
+        let mut state = lock_state(&self.state);
         refresh_state(&mut state);
         state.cached_bytes
     }
 
+    pub fn probe(&self) -> VramAvailability {
+        let mut state = lock_state(&self.state);
+        refresh_state(&mut state);
+        state
+            .fixed_available
+            .map(VramAvailability::Bytes)
+            .unwrap_or_else(|| probe_vram(state.adapter.as_ref()))
+    }
+
     pub fn select_backend(&self, requirements: BackendRequirement) -> ExecutionBackend {
-        decide_backend(self.available_bytes(), requirements.required_vram_bytes)
+        decide_backend_availability(self.probe(), requirements.required_vram_bytes)
     }
 }
 
-pub fn get_platform_vram() -> u64 {
+pub fn probe_platform_vram() -> VramAvailability {
     probe_vram(preferred_wgpu_adapter().as_ref())
 }
 
-fn probe_vram(identity: Option<&GpuAdapterIdentity>) -> u64 {
-    sys_probe::get_platform_vram(identity)
+pub fn get_platform_vram() -> u64 {
+    probe_platform_vram().as_bytes()
+}
+
+fn probe_vram(identity: Option<&GpuAdapterIdentity>) -> VramAvailability {
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = identity;
+        return VramAvailability::Unknown;
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        VramAvailability::Bytes(sys_probe::get_platform_vram(identity))
+    }
 }
 
 fn refresh_state(state: &mut MonitorState) {
+    state.adapter = preferred_wgpu_adapter();
     state.cached_bytes = state
         .fixed_available
-        .unwrap_or_else(|| probe_vram(state.adapter.as_ref()));
+        .map(VramAvailability::Bytes)
+        .unwrap_or_else(|| probe_vram(state.adapter.as_ref()))
+        .as_bytes();
     state.cached_at = Some(Instant::now());
 }
 
 pub fn select_execution_backend(requirements: BackendRequirement) -> ExecutionBackend {
-    decide_backend(get_platform_vram(), requirements.required_vram_bytes)
+    decide_backend_availability(probe_platform_vram(), requirements.required_vram_bytes)
 }
 
 fn decide_backend(available_vram_bytes: u64, required_vram_bytes: u64) -> ExecutionBackend {
-    if available_vram_bytes >= required_vram_bytes {
-        ExecutionBackend::WebGpuBurn
-    } else {
-        ExecutionBackend::CpuLlamaCpp
+    decide_backend_availability(
+        VramAvailability::Bytes(available_vram_bytes),
+        required_vram_bytes,
+    )
+}
+
+fn decide_backend_availability(
+    availability: VramAvailability,
+    required_vram_bytes: u64,
+) -> ExecutionBackend {
+    match availability {
+        VramAvailability::Unknown => ExecutionBackend::CpuLlamaCpp,
+        VramAvailability::Bytes(bytes) if bytes >= required_vram_bytes => {
+            ExecutionBackend::WebGpuBurn
+        }
+        VramAvailability::Bytes(_) => ExecutionBackend::CpuLlamaCpp,
     }
 }
 
@@ -223,6 +291,20 @@ mod tests {
     #[test]
     fn selects_cpu_when_probe_returns_zero() {
         assert_eq!(decide_backend(0, 1), ExecutionBackend::CpuLlamaCpp);
+    }
+
+    #[test]
+    fn unknown_availability_routes_to_zero_bytes() {
+        assert_eq!(VramAvailability::Unknown.as_bytes(), 0);
+        assert!(VramAvailability::Unknown.is_unknown());
+    }
+
+    #[test]
+    fn unknown_availability_routes_to_cpu() {
+        assert_eq!(
+            decide_backend_availability(VramAvailability::Unknown, 0),
+            ExecutionBackend::CpuLlamaCpp
+        );
     }
 
     #[test]

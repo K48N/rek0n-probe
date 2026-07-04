@@ -1,54 +1,60 @@
 # rek0n-probe
 
-Part of my secret lil project called rek0n. Probes GPU memory and decides whether the local daemon runs on WebGPU or falls back to CPU.
+Part of [rek0n](https://github.com/K48N/rek0n). Probes GPU memory and picks WebGPU or CPU for local inference.
 
-## What it is
+## Overview
 
-A Rust library that runs before model load: given a VRAM requirement, it returns `WebGpuBurn` or `CpuLlamaCpp`, or raw available bytes via `get_platform_vram()`. `VramMonitor` adds cached re-probing for long-running daemons.
+Before rek0n loads a model, this crate checks whether the selected GPU has enough free memory for the job. It returns `WebGpuBurn` or `CpuLlamaCpp`, or raw available bytes through `get_platform_vram()`. `VramMonitor` caches readings for long-running daemons.
 
-Crates like sysinfo and nvml-wrapper already read system memory, and for most tools they are the right call. rek0n does not lean on them here because the real question is not total VRAM, it is how much the specific adapter wgpu already selected has free, on whatever OS the daemon happens to be running on. That is narrower and more OS-specific than those crates are built for, so this crate talks to DXGI, NVML, and sysfs directly instead.
+Generic system memory crates answer a different question. rek0n needs free memory on the specific adapter wgpu already chose, measured with OS-specific APIs.
 
 ## How it works
 
-1. Call `wgpu::request_adapter(HighPerformance)` to get the GPU rek0n will bind to.
-2. Query that adapter's **available** memory by PCI vendor/device:
-   - **Windows**: DXGI `QueryVideoMemoryInfo` budget
-   - **macOS**: Metal `recommendedMaxWorkingSetSize`
-   - **Linux**: NVML free (NVIDIA), sysfs total minus used (AMD/i915), xe DRM ioctl (Intel Arc)
-3. Compare against the requirement. Any failure returns `0` and routes to CPU.
+1. `wgpu::request_adapter(HighPerformance)` picks the GPU rek0n will bind to. `VramMonitor::refresh()` re-probes that adapter on each refresh cycle.
+2. Platform code reads **available** memory for that adapter:
+   - **Windows**: DXGI `QueryVideoMemoryInfo`, budget minus current usage
+   - **macOS**: enumerate Metal devices with `MTLCopyAllDevices`, match by normalized device name, read `recommendedMaxWorkingSetSize`
+   - **Linux**: NVML, sysfs, or xe DRM ioctls with PCI matching where possible
+3. If wgpu identity is known but OS matching fails, the probe returns zero and routes to CPU instead of guessing a different card.
+4. `VramAvailability::Unknown` on unsupported hosts also routes to CPU.
 
-## Why it's built this way
+## Design
 
-**wgpu selects the adapter; OS APIs measure it.** These are separate problems. wgpu knows which GPU it will use. DXGI, NVML, and sysfs know how much memory that GPU has free. Picking "largest VRAM" breaks on dual-GPU and hybrid laptops.
+**wgpu selects, OS APIs measure.** Picking the largest card in the system breaks on dual-GPU and hybrid laptops.
 
-**Minimal measurement stack.** No sysinfo, nvml-wrapper, or metal crate: hand-written FFI plus the `windows` crate. wgpu is the only heavy dependency; rek0n needs it anyway.
+**Available memory, not sticker VRAM.** Budget minus usage reflects what the process can actually allocate now.
 
-**Available memory, not capacity.** Budgets and free bytes reflect what the process can use now, not sticker VRAM.
+**Fail closed.** Running on the wrong GPU is worse than falling back to CPU.
 
-**Fail closed.** Wrong backend on GPU is worse than running on CPU.
-
-## Shortcomings
-
-- Intel xe needs kernel 6.9+; i915 discrete uses sysfs.
-- Headless / CI with no GPU returns `0`, and that is intentional.
-- `VramMonitor` locks adapter identity at creation; hot-plug needs a new monitor.
-- If PCI matching fails, the Linux fallback still heuristically picks among cards.
+**Small FFI surface.** Hand-written platform probes plus the `windows` crate. wgpu is the only large shared dependency.
 
 ## Usage
 
 ```rust
-use rek0n_probe::{select_execution_backend, BackendRequirement};
+use rek0n_probe::{select_execution_backend, BackendRequirement, VramMonitor};
 
 let backend = select_execution_backend(BackendRequirement {
     required_vram_bytes: 4_000_000_000,
 });
+
+let monitor = VramMonitor::default();
+let backend = monitor.select_backend(BackendRequirement {
+    required_vram_bytes: 4_000_000_000,
+});
 ```
 
-See `examples/route_workload.rs` for a full WebGPU vs CPU dispatch flow:
+Example:
 
 ```sh
 cargo run --example route_workload
 ```
+
+## Known gaps
+
+- Intel xe needs a recent kernel; i915 discrete uses sysfs heuristics.
+- Headless CI reports zero bytes and routes to CPU.
+- macOS matching is name-based because Metal does not expose PCI ids the way DXGI does.
+- No Apple Silicon unified-memory split between CPU and GPU beyond Metal budgets.
 
 ## License
 

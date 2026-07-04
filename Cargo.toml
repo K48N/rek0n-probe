@@ -28,5 +28,9 @@ windows = { version = "0.52", features = ["Win32_Graphics_Dxgi", "Win32_Foundati
 libloading = "0.8"
 libc = "0.2"
 
+[[example]]
+name = "route_workload"
+path = "examples/route_workload.rs"
+
 [package.metadata.docs.rs]
 all-features = true
