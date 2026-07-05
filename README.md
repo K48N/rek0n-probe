@@ -1,6 +1,6 @@
 # rek0n-probe
 
-Part of [rek0n](https://github.com/K48N/rek0n). Probes GPU memory and picks WebGPU or CPU for local inference.
+Probes GPU memory and picks WebGPU or CPU for local inference.
 
 ## Overview
 
